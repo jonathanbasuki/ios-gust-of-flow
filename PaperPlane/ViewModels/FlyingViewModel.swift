@@ -8,11 +8,9 @@
 import SwiftUI
 import Combine
 
-/// Physics engine managing paper plane position, velocity, gravity, lift (mic), and tilt (motion).
-/// Runs a 60fps display link update loop.
 @MainActor
 final class FlyingViewModel: ObservableObject {
-    
+    // MARK: - Published Position State
     @Published var planeX: CGFloat = 0
     @Published var planeY: CGFloat = 0
     @Published var planeTiltAngle: Double = 0
@@ -20,44 +18,60 @@ final class FlyingViewModel: ObservableObject {
     @Published var isFlying: Bool = false
     @Published var windParticles: [WindParticle] = []
     
+    // MARK: - Touch Lift (Hold-to-Fly Fallback)
+    @Published var touchLiftActive: Bool = false
+    @Published var touchLiftIntensity: CGFloat = 0
+    
+    private let touchLiftRampSpeed: CGFloat = 0.008
+    private let touchLiftMaxIntensity: CGFloat = 0.55
+    private let touchLiftDecay: CGFloat = 0.05
+    
+    // MARK: - Parallax Layers
     @Published var groundOffset: CGFloat = 0
     @Published var skyOffset: CGFloat = 0
     @Published var treesOffset: CGFloat = 0
     
+    // MARK: - Services
     let micService = MicrophoneService()
     let motionService = MotionService()
     private let haptics = HapticsManager.shared
     
+    // MARK: - Physics Constants
     private let gravity: CGFloat = 0.15
     private let maxLift: CGFloat = 0.8
     private let horizontalSpeed: CGFloat = 1.8
     private let dampingFactor: CGFloat = 0.88
     private let maxVelocityY: CGFloat = 8.0
     
-    /// Blow-steer: when blowing, plane also moves toward tilt direction
-    private let blowSteerFactor: CGFloat = 1.2
-    
-    private let maxRollDegrees: Double = 20.0
-    private let maxPitchDegrees: Double = 25.0
+    // MARK: - Visual Tilt Constants
+    private let maxRollDegrees: Double = 30.0
+    private let maxPitchDegrees: Double = 70.0
     private let tiltSmoothing: Double = 0.12
+    private let blowPitchBoost: Double = 25.0
     
+    // MARK: - Physics State (private)
     private var velocityY: CGFloat = 0
     private var velocityX: CGFloat = 0
-    
     private var currentVisualRoll: Double = 0
     private var currentVisualPitch: Double = 0
     
+    // MARK: - Screen Bounds Cache
     var screenWidth: CGFloat = 390
     var screenHeight: CGFloat = 844
     
+    // MARK: - Timer
     private var displayLink: Timer?
     private var particleTimer: Timer?
     
+    // MARK: - Idle Animation
     @Published var idleWobble: Double = 0
-    private var idlePhase: Double = 0
-    private var idleTimer: Timer?
     private var lastInputTime: Date = Date()
+    private var idleTimer: Timer?
     
+    // MARK: - Effective Volume (mic + touch combined)
+    @Published var effectiveVolume: CGFloat = 0
+    
+    // MARK: - Lifecycle
     func startFlying(screenWidth: CGFloat, screenHeight: CGFloat) {
         self.screenWidth = screenWidth
         self.screenHeight = screenHeight
@@ -86,8 +100,11 @@ final class FlyingViewModel: ObservableObject {
         idleTimer = nil
         micService.stopMonitoring()
         motionService.stopMonitoring()
+        touchLiftActive = false
+        touchLiftIntensity = 0
     }
     
+    // MARK: - Physics Loop (60fps)
     private func startPhysicsLoop() {
         displayLink = Timer.scheduledTimer(
             withTimeInterval: 1.0 / 60.0,
@@ -102,42 +119,53 @@ final class FlyingViewModel: ObservableObject {
     private func updatePhysics() {
         guard isFlying else { return }
         
-        let volume = micService.normalizedVolume
+        let micVolume = micService.normalizedVolume
         let roll = motionService.roll
-        let isBlowing = volume > 0.05
         
-        let lift = volume * maxLift
+        // Touch Lift Ramp
+        if touchLiftActive {
+            touchLiftIntensity = min(
+                touchLiftIntensity + touchLiftRampSpeed,
+                touchLiftMaxIntensity
+            )
+        } else {
+            touchLiftIntensity = max(
+                touchLiftIntensity - touchLiftDecay,
+                0
+            )
+        }
+        
+        let combinedVolume = max(micVolume, touchLiftIntensity)
+        effectiveVolume = combinedVolume
+        
+        // Vertical Physics
+        let lift = combinedVolume * maxLift
+        
         velocityY += (gravity - lift)
         velocityY = velocityY.clamped(to: -maxVelocityY...maxVelocityY)
         velocityY *= dampingFactor
+        
         planeY += velocityY
         
-        var horizontalForce = roll * horizontalSpeed
-        
-        if isBlowing {
-            horizontalForce += roll * blowSteerFactor * volume
-        }
-        
-        velocityX += horizontalForce
+        // Horizontal Physics (tilt)
+        velocityX += roll * horizontalSpeed
         velocityX *= dampingFactor
         velocityX = velocityX.clamped(to: -5...5)
         planeX += velocityX
+        
+        // Visual Angles
+        let velocityPitch = Double(-velocityY * 7.0)
+        let blowPitch = Double(combinedVolume) * blowPitchBoost
+        
+        let targetPitch = (velocityPitch + blowPitch).clamped(to: -maxPitchDegrees...maxPitchDegrees)
+        currentVisualPitch += (targetPitch - currentVisualPitch) * tiltSmoothing
+        planeTiltAngle = currentVisualPitch
         
         let targetRoll = Double(roll) * maxRollDegrees
         currentVisualRoll += (targetRoll - currentVisualRoll) * tiltSmoothing
         planeRollAngle = currentVisualRoll
         
-        let velocityPitch = Double(-velocityY * 3).clamped(to: -maxPitchDegrees...maxPitchDegrees)
-        
-        let blowNoseUp = isBlowing ? Double(volume) * -60.0 : 40.0
-        let blowRollInfluence = isBlowing ? Double(roll) * Double(volume) * -60.0 : 40.0
-        
-        let targetPitch = (velocityPitch + blowNoseUp + blowRollInfluence)
-            .clamped(to: -maxPitchDegrees...maxPitchDegrees)
-        
-        currentVisualPitch += (targetPitch - currentVisualPitch) * tiltSmoothing
-        planeTiltAngle = currentVisualPitch
-        
+        // Boundary Clamping
         let topBound: CGFloat = 80
         let bottomBound: CGFloat = screenHeight - 120
         let leftBound: CGFloat = 40
@@ -160,16 +188,19 @@ final class FlyingViewModel: ObservableObject {
             velocityX = -abs(velocityX) * 0.2
         }
         
+        // Parallax Effect
         let heightPercent = (planeY - topBound) / (bottomBound - topBound)
         skyOffset = -heightPercent * 30
         treesOffset = -heightPercent * 50
         groundOffset = -heightPercent * 80
         
-        if volume > 0.05 || abs(roll) > 0.1 {
+        // Idle detection
+        if combinedVolume > 0.05 || abs(roll) > 0.1 {
             lastInputTime = Date()
         }
     }
     
+    // MARK: - Wind Particle System
     private func startParticleSystem() {
         particleTimer = Timer.scheduledTimer(
             withTimeInterval: 0.15,
@@ -183,8 +214,7 @@ final class FlyingViewModel: ObservableObject {
     }
     
     private func spawnWindParticle() {
-        let volume = micService.normalizedVolume
-        guard volume > 0.05 else { return }
+        guard effectiveVolume > 0.05 else { return }
         
         let windDirection: CGFloat = velocityX > 0.5 ? -1 : (velocityX < -0.5 ? 1 : CGFloat.random(in: -1...(-0.5)))
         
@@ -215,6 +245,7 @@ final class FlyingViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Idle Animation
     private func startIdleAnimation() {
         var phase = 0.0
         idleTimer = Timer.scheduledTimer(
@@ -236,7 +267,6 @@ final class FlyingViewModel: ObservableObject {
 }
 
 // MARK: - Wind Particle Model
-
 struct WindParticle: Identifiable {
     let id = UUID()
     var x: CGFloat

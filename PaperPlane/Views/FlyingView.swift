@@ -357,6 +357,11 @@ struct FlyingView: View {
                     }
                 }
                 
+                TouchLiftOverlay(
+                    isActive: $vm.touchLiftActive,
+                    intensity: vm.touchLiftIntensity
+                )
+                
                 uiOverlay(in: geo)
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -374,15 +379,15 @@ struct FlyingView: View {
         .ignoresSafeArea()
     }
     
-    /// Pitch clamped and flipped by direction, max ±25°
+    /// Pitch clamped and flipped by direction
     private var safePitchAngle: Double {
-        let raw = vm.planeTiltAngle * Double(smoothDirection)
-        return raw.clamped(to: -25...25)
+        let raw = -vm.planeTiltAngle * Double(planeDirection)
+        return raw.clamped(to: -60...60)
     }
     
-    /// Roll clamped to max ±20° to prevent plane looking broken
+    /// Roll clamped to prevent plane looking broken
     private var safeRollAngle: Double {
-        vm.planeRollAngle.clamped(to: -20...20)
+        vm.planeRollAngle.clamped(to: -25...25)
     }
     
     @ViewBuilder
@@ -775,8 +780,148 @@ struct FlyingView: View {
     }
 }
 
-// MARK: - Horizon Sun View (Sunset/Sunrise)
+struct TouchLiftOverlay: View {
+    @Binding var isActive: Bool
+    let intensity: CGFloat
+    
+    @State private var showRipple: Bool = false
+    @State private var touchLocation: CGPoint = .zero
+    
+    var body: some View {
+        GeometryReader { geo in
+            // ── Invisible touch zone (bottom 60% of screen) ──
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())  // Makes clear area tappable
+                .frame(
+                    width: geo.size.width,
+                    height: geo.size.height * 0.6
+                )
+                .position(
+                    x: geo.size.width / 2,
+                    y: geo.size.height * 0.7
+                )
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            if !isActive {
+                                touchLocation = value.location
+                                triggerRipple()
+                            }
+                            isActive = true
+                        }
+                        .onEnded { _ in
+                            isActive = false
+                        }
+                )
+            
+            // ── Visual feedback: ripple at touch point ────
+            if showRipple && isActive {
+                Circle()
+                    .stroke(Color.white.opacity(0.2 + 0.3 * Double(intensity)), lineWidth: 1.5)
+                    .frame(
+                        width: 40 + CGFloat(intensity) * 30,
+                        height: 40 + CGFloat(intensity) * 30
+                    )
+                    .position(touchLocation)
+                    .animation(.easeOut(duration: 0.15), value: intensity)
+                
+                // Inner glow
+                Circle()
+                    .fill(Color.white.opacity(0.05 + 0.10 * Double(intensity)))
+                    .frame(
+                        width: 20 + CGFloat(intensity) * 20,
+                        height: 20 + CGFloat(intensity) * 20
+                    )
+                    .position(touchLocation)
+                    .animation(.easeOut(duration: 0.12), value: intensity)
+            }
+        }
+        .allowsHitTesting(true)
+    }
+    
+    private func triggerRipple() {
+        showRipple = true
+    }
+}
 
+// MARK: - Fly Button (for Control Panel)
+/// Visual hold button shown in the control panel
+struct FlyButtonView: View {
+    @Binding var isActive: Bool
+    let intensity: CGFloat
+    
+    var body: some View {
+        VStack(spacing: 5) {
+            // ── Hold Button ───────────────────────────────
+            ZStack {
+                // Outer ring — pulses with intensity
+                Circle()
+                    .stroke(
+                        Color.white.opacity(0.15 + 0.4 * Double(intensity)),
+                        lineWidth: 2
+                    )
+                    .frame(
+                        width: 48 + CGFloat(intensity) * 8,
+                        height: 48 + CGFloat(intensity) * 8
+                    )
+                    .animation(.easeOut(duration: 0.12), value: intensity)
+                
+                // Inner fill — grows with intensity
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(isActive ? 0.25 : 0.08),
+                                Color.white.opacity(isActive ? 0.10 : 0.03),
+                            ],
+                            center: .center,
+                            startRadius: 2,
+                            endRadius: 22
+                        )
+                    )
+                    .frame(width: 44, height: 44)
+                
+                // Icon
+                Image(systemName: isActive ? "arrow.up.circle.fill" : "hand.tap.fill")
+                    .font(.system(size: isActive ? 18 : 16, weight: .medium))
+                    .foregroundColor(
+                        Color.white.opacity(isActive ? 0.9 : 0.55)
+                    )
+                    .animation(.easeOut(duration: 0.15), value: isActive)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isActive = true }
+                    .onEnded { _ in isActive = false }
+            )
+            
+            // ── Intensity bar ─────────────────────────────
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 40, height: 4)
+                
+                Capsule()
+                    .fill(Color.white.opacity(0.6))
+                    .frame(
+                        width: max(2, 40 * intensity),
+                        height: 4
+                    )
+                    .animation(.easeOut(duration: 0.1), value: intensity)
+            }
+            
+            // ── Label ─────────────────────────────────────
+            Text(isActive ? "Flying ↑" : "Hold to fly")
+                .font(.system(size: 9, weight: .light, design: .rounded))
+                .foregroundColor(.white.opacity(isActive ? 0.7 : 0.4))
+                .kerning(0.3)
+                .animation(.easeOut(duration: 0.2), value: isActive)
+        }
+    }
+}
+
+// MARK: - Horizon Sun View (Sunset/Sunrise)
 struct HorizonSunView: View {
     let timeOfDay: TimeOfDay
     @State private var pulsing = false

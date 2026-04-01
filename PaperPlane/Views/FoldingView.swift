@@ -5,10 +5,14 @@
 
 import SwiftUI
 import Combine
+import AVFoundation
 
 struct FoldingView: View {
     @StateObject private var vm = FoldingViewModel()
     @EnvironmentObject private var appState: AppState
+    
+    // Sound Manager
+    @StateObject private var soundManager = SoundManager.shared
 
     @State private var titleAppeared = false
     @State private var instructionShake = false
@@ -18,6 +22,9 @@ struct FoldingView: View {
     @State private var dragStartedInZone = false
     @State private var dragStartLocation: CGPoint = .zero
     @State private var showWrongZoneHint = false
+    
+    // Track previous step for sound trigger
+    @State private var previousStep: FoldStep = .flat
 
     var body: some View {
         ZStack {
@@ -51,6 +58,19 @@ struct FoldingView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
+            
+            // Mute button
+            VStack {
+                HStack {
+                    Spacer()
+                    muteButton
+                        .padding(.trailing, 20)
+                        .padding(.top, 58)
+                        .padding(.horizontal, 12)
+                }
+                Spacer()
+            }
+            .ignoresSafeArea()
         }
         .onAppear {
             withAnimation(.easeOut(duration: 0.8).delay(0.2)) {
@@ -59,6 +79,7 @@ struct FoldingView: View {
         }
     }
 
+    // MARK: - Header
     private var headerSection: some View {
         VStack(spacing: 8) {
             Text("Gust of Flow")
@@ -78,7 +99,40 @@ struct FoldingView: View {
         .multilineTextAlignment(.center)
         .animation(.easeOut(duration: 0.8), value: titleAppeared)
     }
+    
+    // MARK: - Mute Button
+    private var muteButton: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                soundManager.toggleMute()
+            }
+        }) {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.6))
+                    .frame(width: 36, height: 36)
+                    .shadow(
+                        color: Color.black.opacity(0.06),
+                        radius: 8, x: 0, y: 2
+                    )
+                
+                Image(systemName: soundManager.isMuted
+                      ? "speaker.slash.fill"
+                      : "speaker.wave.2.fill"
+                )
+                .font(.system(size: 14, weight: .light))
+                .foregroundColor(
+                    soundManager.isMuted
+                        ? Color(hex: "#BBBBBB")
+                        : Color(hex: "#A8D8EA")
+                )
+            }
+        }
+        .buttonStyle(BouncyButtonStyle())
+        .opacity(titleAppeared ? 1 : 0)
+    }
 
+    // MARK: - Central Canvas
     private var centralCanvas: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 32)
@@ -205,6 +259,7 @@ struct FoldingView: View {
         }
     }
 
+    // MARK: - Bottom Section
     private var bottomSection: some View {
         VStack(spacing: 20) {
             stepProgressDots
@@ -242,6 +297,7 @@ struct FoldingView: View {
                 Button(action: {
                     withAnimation(.easeInOut) {
                         vm.reset()
+                        previousStep = .flat
                     }
                 }) {
                     HStack(spacing: 6) {
@@ -264,6 +320,7 @@ struct FoldingView: View {
         .animation(.easeInOut(duration: 0.2), value: showWrongZoneHint)
     }
 
+    // MARK: - Step Progress Dots
     private var stepProgressDots: some View {
         HStack(spacing: 10) {
             ForEach(FoldStep.allCases, id: \.self) { step in
@@ -316,6 +373,7 @@ struct FoldingView: View {
         )
     }
 
+    // MARK: - Start Flying Button
     private var startFlyingButton: some View {
         Button(action: {
             appState.navigateToFlying()
@@ -377,6 +435,7 @@ struct FoldingView: View {
         }
     }
 
+    // MARK: - Fold Gesture (dengan Audio)
     private var foldGesture: some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .local)
             .onChanged { value in
@@ -393,6 +452,7 @@ struct FoldingView: View {
 
                     dragStartLocation = localStart
                     dragStartedInZone = vm.currentStep.isInDragZone(localStart)
+                    previousStep = vm.currentStep
 
                     if !dragStartedInZone {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -405,6 +465,9 @@ struct FoldingView: View {
 
                 if dragStartedInZone {
                     vm.onDragChanged(value)
+                    
+                    soundManager.playSlideSound()
+                    
                 } else {
                     vm.isDragging = true
                     vm.dragOffset = value.translation
@@ -413,6 +476,10 @@ struct FoldingView: View {
             .onEnded { value in
                 if dragStartedInZone {
                     vm.onDragEnded(value)
+                    
+                    if vm.currentStep != previousStep {
+                        soundManager.playFoldSound(for: vm.currentStep)
+                    }
 
                     let drag: CGFloat
                     switch vm.currentStep.primaryDragAxis {
@@ -421,7 +488,10 @@ struct FoldingView: View {
                     case .vertical:
                         drag = abs(value.translation.height)
                     case .any:
-                        drag = max(abs(value.translation.height), abs(value.translation.width))
+                        drag = max(
+                            abs(value.translation.height),
+                            abs(value.translation.width)
+                        )
                     }
 
                     if !vm.isCompleted
@@ -443,6 +513,9 @@ struct FoldingView: View {
                         instructionShake = false
                     }
                 }
+                
+                // Stop slide sound
+                soundManager.stop("paper_slide")
 
                 dragStartedInZone = false
 
